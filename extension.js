@@ -12,27 +12,30 @@ export default class FickleFossTracker extends Extension {
 	cancellable = null;
 	app_system = null;
 	app_state_changed_connection = null;
-	icons_dir = GLib.get_home_dir() + "/.local/share/fickle-foss/app-icons-cache";
-	queue_dir_path = GLib.get_home_dir() + "/.local/share/fickle-foss/";
-	queue_file_path = this.queue_dir_path + 'dbqueue'
+	icons_dir = null;
+	queue_dir_path = null;
+	queue_file_path = null;
 	queue_file = null;
-
 	/* We keep a record of dates and apps used.
 	 * This record is checked before inserting a new record into the database. I didn't test it but presumably this is faster for ignoring duplicate entries than relying on the IGNORE part of the SQL statement (log_app).
 	 * Structure is: { date: [app id's] }
 	 */ 
-	apps_used = {};
+	apps_used = null;
 
 	async enable() {
 		this.cancellable = new Gio.Cancellable()
-		
+		this.icons_dir = GLib.get_home_dir() + "/.local/share/fickle-foss/app-icons-cache";
+		this.queue_dir_path = GLib.get_home_dir() + "/.local/share/fickle-foss/";
+		this.queue_file_path = this.queue_dir_path + 'dbqueue'
+		this.apps_used = {};
+	
 		// Ensure icons dir exist. Create any missing directories as required. 
 		// Conincidently creates the queue_dir_path as well.
 		GLib.mkdir_with_parents(this.icons_dir, 0o755);
 
 		await this.init_queue();
 
-		this.update_icon_cache().catch(logError);
+		this.update_icon_cache().catch(e => console.error(e));
 
 		this.app_system = Shell.AppSystem.get_default();
 		this.app_state_changed_connection = this.app_system.connect("app-state-changed", (_, app) => {
@@ -43,10 +46,20 @@ export default class FickleFossTracker extends Extension {
 	}
 
 	disable() {
-		this.app_system.disconnect(this.app_state_changed_connection);
+		if (this.app_state_changed_connection) {
+			this.app_system?.disconnect(this.app_state_changed_connection);
+			this.app_state_changed_connection = null;
+		}
 		this.app_system = null;
-		this.cancellable.cancel();
+
+		this.cancellable?.cancel();
 		this.cancellable = null;
+
+		this.icons_dir = null;
+		this.queue_dir_path = null;
+		this.queue_file_path = null;
+		this.queue_file = null;
+		this.apps_used = null;
 	}
 
 	/***
