@@ -1,7 +1,7 @@
 {
-  "uuid": "fickle-foss-tracker-gnome-extension@foss.fickle.giving",
+  "uuid": "fickle-foss-tracker-gnome-extension@giving.fickle.FickleFOSS",
   "name": "Fickle FOSS Tracker",
-  "description": "For use with the Fickle FOSS app. Runs in the background, recording the dates that apps are used.",
+  "description": "For use with the Fickle FOSS app. Records the dates that apps are used.",
   "url": "https://github.com/benopotamus/fickle-foss-tracker-gnome-extension",
   "shell-version": ["50"]
 }
