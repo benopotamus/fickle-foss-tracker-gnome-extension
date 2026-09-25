@@ -16,30 +16,41 @@ export default class FickleFossTracker extends Extension {
 	queue_dir_path = null;
 	queue_file_path = null;
 	queue_file = null;
-	/* We keep a record of dates and apps used.
-	 * This record is checked before inserting a new record into the database. I didn't test it but presumably this is faster for ignoring duplicate entries than relying on the IGNORE part of the SQL statement (log_app).
-	 * Structure is: { date: [app id's] }
-	 */ 
-	apps_used = null;
+	apps_used = null; // Prevent duplicate entries in the queue file
 
 	async enable() {
 		this.cancellable = new Gio.Cancellable()
-		this.icons_dir = GLib.get_home_dir() + "/.local/share/fickle-foss/app-icons-cache";
-		this.queue_dir_path = GLib.get_home_dir() + "/.local/share/fickle-foss/";
-		this.queue_file_path = this.queue_dir_path + 'dbqueue'
 		this.apps_used = {};
-	
-		// Ensure icons dir exist. Create any missing directories as required. 
-		// Conincidently creates the queue_dir_path as well.
-		GLib.mkdir_with_parents(this.icons_dir, 0o755);
 
+		// Figure out if Fickle FOSS is installed as a Flatpak by looking for "X-Flatpak" entry in the desktop file (if one exists)
+		const fickle_app = Shell.AppSystem.get_default().lookup_app('giving.fickle.FickleFOSS.desktop');
+		const fickle_app_info = fickle_app?.get_app_info();
+		const is_flatpak = fickle_app_info?.has_key('X-Flatpak') ?? false;
+
+		if (is_flatpak) {
+			// icon cache is only needed for Flatpak version
+			// NOTE the seemingly redundant "fickle-foss" in the paths is needed to match how the Fickle FOSS app uses XDG Dirs
+			const flatpak_userfiles_dir = GLib.get_home_dir() + '/.var/app/giving.fickle.FickleFOSS';
+			this.icons_dir = flatpak_userfiles_dir + '/cache/fickle-foss/app-icons-cache';
+			this.queue_dir_path = flatpak_userfiles_dir + '/data/fickle-foss/';
+		} else {
+			this.queue_dir_path = GLib.get_user_data_dir() + "/fickle-foss/";
+		}
+		GLib.mkdir_with_parents(this.queue_dir_path, 0o700); // Create queue dir if needed
+		this.queue_file_path = this.queue_dir_path + 'dbqueue';
 		await this.init_queue();
 
-		this.update_icon_cache().catch(e => console.error(e));
+		// icon cache is only needed for Flatpak version
+		if (is_flatpak) {
+			GLib.mkdir_with_parents(this.icons_dir, 0o700);
+			this.update_icon_cache().catch(e => console.error(e));
+		}
 
 		this.app_system = Shell.AppSystem.get_default();
 		this.app_state_changed_connection = this.app_system.connect("app-state-changed", (_, app) => {
-			if (app.state == Shell.AppState.STARTING) {
+			/* We need to match on RUNNING rather than STARTING because there's a few apps that don't go through the STARTING state. Possibly because they have `StartupNotify=false` in their `.desktop` files.
+			 * The check for `get_app_info` is needed to filter out (windowless??) apps with names like "window:26" */
+			if ((app.state == Shell.AppState.RUNNING) && (app.get_app_info() !== null)) {
 				this.log_app(app.get_id(), app.get_name());
 			}
 		})
@@ -63,11 +74,7 @@ export default class FickleFossTracker extends Extension {
 	}
 
 	/***
-	 * Copies icon files to a directory where Flatpak Fickle FOSS can see it.
-	 * 
-	 * Files are stored in an "icons" directory. If files are svg's, they are stored in that directory. If files are anything itself (presumably a raster image format) they are stored in "64" and "96" subdirectories. The numbers represent pixel size.
-	 * 
-	 * Note: Some apps have a 64px raster (e.g. PNG) icon, as well as an SVG for the 96px variant. This code will end up copying both. I don't think that really matters as they're small images and Fickle FOSS will use the SVG variant if available.
+	 * Copies icon files to a directory where Flatpak Fickle FOSS can see it. Overwrites files if they exist.
 	 */
 	async update_icon_cache() {
 		const theme = new St.IconTheme();
@@ -102,12 +109,7 @@ export default class FickleFossTracker extends Extension {
 	}
 
 	/***
-	 * Cache an app's icon by copying it to a directory that is accessible by Flatpak Fickle FOSS.
-	 * 
-	 * Cached files are named with the app's desktop file name.
-	 * 
-	 * The size argument adds an identifier to the name which is used by Fickle FOSS to determine how to use the icon.
-	 * No size assumes the icon is an SVG (i.e. useable at any size)
+	 * The actual copy function.
 	 */
 	async copy_icon(desktop_file, icon_path, size=null) {
 		const source_file = Gio.File.new_for_path(icon_path);
@@ -116,18 +118,17 @@ export default class FickleFossTracker extends Extension {
 		if (source_file.get_basename().endsWith('.svg')) {
 			dest_file = Gio.File.new_for_path(`${this.icons_dir}/${desktop_file}.svg`); // Add .svg to filename
 		} else {
-			dest_file = Gio.File.new_for_path(`${this.icons_dir}/${desktop_file}.${size}`); // Add .{size} to filename
+			dest_file = Gio.File.new_for_path(`${this.icons_dir}/${desktop_file}.${size}`); // Add .{size} to filename. This is used by Fickle FOSS to determine how to use the icon.
 		}
 
 		await source_file.copy_async(dest_file, Gio.FileCopyFlags.OVERWRITE, GLib.PRIORITY_DEFAULT, this.cancellable, null);
 	}
 
+	/***
+	 * Adds a record to the queue file (denoting that an app was run on today's date) 
+	 */
 	async log_app(app_id, app_name) {
-		/***
-		 * Adds a record to the database that the app was run today.
-		 * 
-		 * This is called each time the "app-state-changed" signal is fired.
-		 */
+
 		let date = Temporal.Now.plainDateISO();
 
 		// Skip logging if an entry already exists for this app on this date
@@ -146,12 +147,12 @@ export default class FickleFossTracker extends Extension {
 		this.apps_used[date].push(app_id);
 	}
 
+	/***
+	 * Creates an empty queue file
+	 * 
+	 * The queue is a list of apps and the date they were run. The queue file is processed by Fickle FOSS when it is run, which creates the necessary records in the database.
+	 */
 	async init_queue() {
-		/***
-		 * Creates an empty queue file
-		 * 
-		 * The queue is a list of apps and the date they were run. The queue file is processed by Fickle FOSS when it is run, which creates the necessary records in the database.
-		 */
 		// Get Gio file reference
 		this.queue_file = Gio.File.new_for_path(this.queue_file_path);
 
